@@ -1,6 +1,10 @@
 import logging
+import string
 import sys
+import urllib
 
+from django.contrib.gis.db import models as geo_models
+from django.contrib.postgres.indexes import HashIndex
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models.fields.related import ForeignObject
@@ -185,6 +189,7 @@ class State(models.Model):
     name = models.CharField(max_length=165, blank=True)
     code = models.CharField(max_length=3, blank=True)
     country = models.ForeignKey(Country, on_delete=models.CASCADE, related_name='states')
+    point = geo_models.PointField(geography=True, null=True, blank=True)
 
     class Meta:
         unique_together = ('name', 'country')
@@ -210,6 +215,7 @@ class Locality(models.Model):
     name = models.CharField(max_length=165, blank=True)
     postal_code = models.CharField(max_length=10, blank=True)
     state = models.ForeignKey(State, on_delete=models.CASCADE, related_name='localities')
+    point = geo_models.PointField(geography=True, null=True, blank=True)
 
     class Meta:
         verbose_name_plural = 'Localities'
@@ -239,15 +245,19 @@ class Address(models.Model):
     street_number = models.CharField(max_length=20, blank=True)
     route = models.CharField(max_length=100, blank=True)
     locality = models.ForeignKey(Locality, on_delete=models.CASCADE, related_name='addresses', blank=True, null=True)
-    raw = models.CharField(max_length=200)
-    formatted = models.CharField(max_length=200, blank=True)
+    raw = models.CharField(max_length=255)
     latitude = models.FloatField(blank=True, null=True)
     longitude = models.FloatField(blank=True, null=True)
+    formatted = models.CharField(max_length=255, blank=True)
+    point = geo_models.PointField(geography=True, null=True, blank=True)
 
     class Meta:
         verbose_name_plural = 'Addresses'
         ordering = ('locality', 'route', 'street_number')
         # unique_together = ('locality', 'route', 'street_number')
+        indexes = [
+            HashIndex(fields=['formatted']),
+        ]
 
     def __str__(self):
         if self.formatted != '':
@@ -290,6 +300,41 @@ class Address(models.Model):
                     ad['country'] = self.locality.state.country.name
                     ad['country_code'] = self.locality.state.country.code
         return ad
+
+    @property
+    def google_maps_url(self):
+        if not self.formatted:
+            self.format_address()
+        return 'https://maps.google.com/?{}'.format(urllib.urlencode({'q': self.formatted}))
+
+    @property
+    def informal_address(self):
+        if not self.formatted:
+            self.format_address()
+        return string.capwords(self.formatted.split(',')[0])
+
+    def geocode(self):
+        if not self.formatted:
+            self.format_address()
+        self.point = 'POINT({} {})'.format(self.longitude, self.latitude)
+        self.save()
+
+    def format_address(self):
+        if self.formatted != '':
+            txt = '%s' % self.formatted
+        elif self.locality:
+            txt = ''
+            if self.street_number:
+                txt = '%s' % self.street_number
+            if self.route:
+                if txt:
+                    txt += ' %s' % self.route
+            locality = '%s' % self.locality
+            if txt and locality:
+                txt += ', '
+            txt += locality
+        self.formatted = txt
+        self.save()
 
 
 class AddressDescriptor(ForwardManyToOneDescriptor):
